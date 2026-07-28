@@ -87,7 +87,7 @@ def _ttm(rev_series: pd.Series) -> float:
     return float(rev_series.iloc[-4:].sum()) if len(rev_series) >= 4 else float(rev_series.sum())
 
 
-def _historical_ps_series(tkr: yf.Ticker, rev_series: pd.Series, years: int) -> pd.Series:
+def _historical_ps_series(tkr: yf.Ticker, rev_series: pd.Series, years: int) -> tuple[pd.Series, pd.Series]:
     """
     Builds a historical trailing-P/S series by combining:
       - rolling 4-quarter revenue at each quarter-end
@@ -98,6 +98,11 @@ def _historical_ps_series(tkr: yf.Ticker, rev_series: pd.Series, years: int) -> 
     This is an approximation (shares outstanding drift is ignored) but is
     good enough to place the CURRENT P/S in its historical distribution,
     which is all the model needs.
+
+    Returns (ps_series, price_series) -- the raw price series is also
+    returned (not just the derived P/S values) so callers that need recent
+    price history (e.g. relative-strength return calcs) can reuse it
+    instead of making a second .history() call for the same ticker.
     """
     shares = tkr.fast_info.get("shares_outstanding") or tkr.info.get("sharesOutstanding")
     if not shares:
@@ -108,7 +113,10 @@ def _historical_ps_series(tkr: yf.Ticker, rev_series: pd.Series, years: int) -> 
     rolling_ttm = rolling_ttm[rolling_ttm.index >= cutoff]
 
     start = rolling_ttm.index.min() - pd.Timedelta(days=10)
-    end = rolling_ttm.index.max() + pd.Timedelta(days=10)
+    # Extend to today rather than stopping at the last reported quarter-end +10 days --
+    # revenue reporting lags 1-3 months, so the old end date left this series (and
+    # anything reusing it, e.g. relative-strength calcs) stale by that same lag.
+    end = pd.Timestamp.today()
     prices = tkr.history(start=start, end=end, interval="1d")["Close"]
     if prices.empty:
         raise ValueError("No price history available")
@@ -123,7 +131,7 @@ def _historical_ps_series(tkr: yf.Ticker, rev_series: pd.Series, years: int) -> 
         market_cap_at_time = price * shares
         ps_values.append(market_cap_at_time / ttm_rev)
 
-    return pd.Series(ps_values)
+    return pd.Series(ps_values), prices
 
 
 def _forward_revenue_estimate(tkr: yf.Ticker) -> float | None:
@@ -322,12 +330,20 @@ def _period_return(price_series: pd.Series, months: int) -> float | None:
     return float(window.iloc[-1] / window.iloc[0] - 1)
 
 
-def _relative_strength(tkr: yf.Ticker, symbol: str) -> dict:
-    """6-month total return vs. a region-appropriate benchmark index (falls back to
-    the S&P 500 for US-listed and unmapped tickers -- see _BENCHMARK_BY_SUFFIX)."""
+def _relative_strength(tkr: yf.Ticker, symbol: str, price_series: pd.Series | None = None) -> dict:
+    """
+    6-month total return vs. a region-appropriate benchmark index (falls
+    back to the S&P 500 for US-listed and unmapped tickers -- see
+    _BENCHMARK_BY_SUFFIX).
+
+    price_series: if the caller already fetched recent daily closes for
+    this ticker (e.g. _historical_ps_series' returned price series), pass
+    it in to skip a second, redundant .history() call for the same ticker.
+    Falls back to fetching fresh if not provided or too short.
+    """
     out: dict = {}
     try:
-        stock_hist = tkr.history(period="7mo")["Close"]
+        stock_hist = price_series if price_series is not None and len(price_series) > 5 else tkr.history(period="7mo")["Close"]
         stock_return = _period_return(stock_hist, 6)
         if stock_return is None:
             return out
@@ -511,7 +527,7 @@ def fetch_ticker(symbol: str, history_years: int = 5) -> RawTickerData:
     if not market_cap:
         raise ValueError(f"{symbol}: no market cap available")
 
-    hist_ps = _historical_ps_series(tkr, ps_rev_series, years=history_years)
+    hist_ps, price_series = _historical_ps_series(tkr, ps_rev_series, years=history_years)
     forward_rev = _forward_revenue_estimate(tkr)
     if forward_rev and fx_rate:
         forward_rev = forward_rev * fx_rate
@@ -526,7 +542,7 @@ def fetch_ticker(symbol: str, history_years: int = 5) -> RawTickerData:
     if dilution is not None:
         extras["share_count_cagr_3y"] = dilution
     extras.update(_capital_allocation(tkr))
-    extras.update(_relative_strength(tkr, symbol))
+    extras.update(_relative_strength(tkr, symbol, price_series=price_series))
     extras.update(_eps_revisions(tkr))
 
     return RawTickerData(
