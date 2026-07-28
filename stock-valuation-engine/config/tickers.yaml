@@ -158,7 +158,7 @@ sections:
         tickers:
           - ABB.NS             # ABB India
           - SIEMENS.NS         # Siemens India
-          - HITACHIENR.NS      # Hitachi Energy India -- verify
+          - POWERINDIA.NS      # Hitachi Energy India -- verify
           - CGPOWER.NS         # CG Power and Industrial Solutions
           - PIIND.NS           # PI Industries
           - SUNPHARMA.NS       # Sun Pharmaceutical
